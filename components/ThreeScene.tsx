@@ -14,10 +14,15 @@ interface ThreeSceneProps {
   onRafTick?: (time: number) => void
 }
 
-const BLOOM_LAYER  = 1
-const COMPUTE_SIZE = 128
+const BLOOM_LAYER = 1
 
-// ── Vertex / Fragment shaders for image planes ──────────────────────────────
+// desktop=236 → 55k particles | tablet=128 → 16k | mobile=64 → 4k
+function getComputeSize(device: DeviceInfo): number {
+  if (device.isMobile || device.isPhablet) return 64
+  if (device.isTablet) return 128
+  return 236
+}
+
 const planeVertexShader = `
 uniform float uVelocity;
 uniform float uHoverStrength;
@@ -45,8 +50,8 @@ uniform vec2 uMouse;
 uniform float uHoverStrength;
 varying vec2 vUv;
 void main() {
-  float imageAspect = uImageSize.x / uImageSize.y;
-  float planeAspect = uPlaneSize.x / uPlaneSize.y;
+  float imageAspect = uImageSize.x / max(uImageSize.y, 0.001);
+  float planeAspect = uPlaneSize.x / max(uPlaneSize.y, 0.001);
   vec2 uv = vUv;
   if (imageAspect > planeAspect) {
     float scale = planeAspect / imageAspect;
@@ -69,7 +74,6 @@ void main() {
 }
 `
 
-// ── GPGPU position shader ────────────────────────────────────────────────────
 const positionFragmentShader = `
 uniform vec3 uBounds;
 uniform float uDelta;
@@ -92,7 +96,6 @@ void main() {
 }
 `
 
-// ── GPGPU velocity shader (curl noise + mouse repulsion) ─────────────────────
 const velocityFragmentShader = `
 uniform vec3 uMouse;
 uniform vec3 uBounds;
@@ -122,7 +125,7 @@ float snoise(vec3 v) {
     + i.y + vec4(0.0, i1.y, i2.y, 1.0))
     + i.x + vec4(0.0, i1.x, i2.x, 1.0));
   float n_ = 1.0/7.0;
-  vec3  ns = n_ * D.wyz - D.xzx;
+  vec3 ns = n_ * D.wyz - D.xzx;
   vec4 j  = p - 49.0 * floor(p * ns.z * ns.z);
   vec4 x_ = floor(j * ns.z);
   vec4 y_ = floor(j - 7.0 * x_);
@@ -169,11 +172,11 @@ void main() {
   vec3 targetVel = curlNoise(pos * 0.002 + uTime * 0.2) * 2.0;
   vel += (targetVel - vel) * 0.05;
   float dist = distance(pos.xy, uMouse.xy);
-  float maxDist = 100.0;
+  float maxDist = 120.0;
   if (dist < maxDist) {
     vec2 dir = pos.xy - uMouse.xy;
     float force = (maxDist - dist) / maxDist;
-    vel.xy += normalize(dir + 0.0001) * force * 20.0;
+    vel.xy += normalize(dir + 0.0001) * force * 22.0;
   }
   vel *= 0.95;
   gl_FragColor = vec4(vel, 1.0);
@@ -190,9 +193,10 @@ export default function ThreeScene({ device, onSceneReady, onRafTick }: ThreeSce
     const W = () => window.innerWidth
     const H = () => window.innerHeight
 
-    // ── Scene / Camera / Renderer ────────────────────────────
-    const scene    = new THREE.Scene()
-    const camera   = new THREE.OrthographicCamera(0, W(), H(), 0, -1000, 1000)
+    const COMPUTE_SIZE = getComputeSize(device)
+
+    const scene  = new THREE.Scene()
+    const camera = new THREE.OrthographicCamera(0, W(), H(), 0, -1000, 1000)
     camera.position.z = 10
 
     const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true })
@@ -240,57 +244,55 @@ export default function ThreeScene({ device, onSceneReady, onRafTick }: ThreeSce
     finalComposer.addPass(renderPass)
     finalComposer.addPass(finalPass)
 
-    // ── GPGPU (skip on mobile to save battery) ───────────────
+    // ── GPGPU — runs on ALL devices, size scales per breakpoint ─
     let gpuCompute:       GPUComputationRenderer | null = null
     let positionVariable: ReturnType<GPUComputationRenderer['addVariable']> | null = null
     let velocityVariable: ReturnType<GPUComputationRenderer['addVariable']> | null = null
     let particles:        THREE.Points | null = null
     let pointsMaterial:   THREE.ShaderMaterial | null = null
-    const fboMouse = new THREE.Vector3(0, 0, 0)
+    const fboMouse = new THREE.Vector3(W() / 2, H() / 2, 0)
 
-    if (!device.isMobile) {
-      try {
-        gpuCompute = new GPUComputationRenderer(COMPUTE_SIZE, COMPUTE_SIZE, renderer)
+    try {
+      gpuCompute = new GPUComputationRenderer(COMPUTE_SIZE, COMPUTE_SIZE, renderer)
 
-        const posTex = gpuCompute.createTexture()
-        const velTex = gpuCompute.createTexture()
+      const posTex = gpuCompute.createTexture()
+      const velTex = gpuCompute.createTexture()
 
-        // fill position
-        const pd = posTex.image.data as Float32Array
-        for (let i = 0; i < pd.length; i += 4) {
-          pd[i]   = Math.random() * W()
-          pd[i+1] = Math.random() * H()
-          pd[i+2] = (Math.random() - 0.5) * 100
-          pd[i+3] = 1
-        }
-        // fill velocity (zeros)
-        const vd = velTex.image.data as Float32Array
-        for (let i = 0; i < vd.length; i += 4) { vd[i+3] = 1 }
+      const pd = posTex.image.data as Float32Array
+      for (let i = 0; i < pd.length; i += 4) {
+        pd[i]   = Math.random() * W()
+        pd[i+1] = Math.random() * H()
+        pd[i+2] = (Math.random() - 0.5) * 100
+        pd[i+3] = 1
+      }
+      const vd = velTex.image.data as Float32Array
+      for (let i = 0; i < vd.length; i += 4) { vd[i+3] = 1 }
 
-        positionVariable = gpuCompute.addVariable('texturePosition', positionFragmentShader, posTex)
-        velocityVariable = gpuCompute.addVariable('textureVelocity', velocityFragmentShader, velTex)
+      positionVariable = gpuCompute.addVariable('texturePosition', positionFragmentShader, posTex)
+      velocityVariable = gpuCompute.addVariable('textureVelocity', velocityFragmentShader, velTex)
 
-        gpuCompute.setVariableDependencies(positionVariable, [positionVariable, velocityVariable])
-        gpuCompute.setVariableDependencies(velocityVariable, [positionVariable, velocityVariable])
+      gpuCompute.setVariableDependencies(positionVariable, [positionVariable, velocityVariable])
+      gpuCompute.setVariableDependencies(velocityVariable, [positionVariable, velocityVariable])
 
-        positionVariable.material.uniforms.uBounds = { value: new THREE.Vector3(W(), H(), 100) }
-        positionVariable.material.uniforms.uTime   = { value: 0 }
-        positionVariable.material.uniforms.uDelta  = { value: 0.016 }
+      positionVariable.material.uniforms.uBounds = { value: new THREE.Vector3(W(), H(), 100) }
+      positionVariable.material.uniforms.uTime   = { value: 0 }
+      positionVariable.material.uniforms.uDelta  = { value: 0.016 }
 
-        velocityVariable.material.uniforms.uBounds = { value: new THREE.Vector3(W(), H(), 100) }
-        velocityVariable.material.uniforms.uTime   = { value: 0 }
-        velocityVariable.material.uniforms.uDelta  = { value: 0.016 }
-        velocityVariable.material.uniforms.uMouse  = { value: fboMouse }
+      velocityVariable.material.uniforms.uBounds = { value: new THREE.Vector3(W(), H(), 100) }
+      velocityVariable.material.uniforms.uTime   = { value: 0 }
+      velocityVariable.material.uniforms.uDelta  = { value: 0.016 }
+      velocityVariable.material.uniforms.uMouse  = { value: fboMouse }
 
-        const err = gpuCompute.init()
-        if (err) { gpuCompute = null; positionVariable = null; velocityVariable = null }
-      } catch { gpuCompute = null; positionVariable = null; velocityVariable = null }
+      const err = gpuCompute.init()
+      if (err) { gpuCompute = null; positionVariable = null; velocityVariable = null }
+    } catch {
+      gpuCompute = null; positionVariable = null; velocityVariable = null
     }
 
     // ── Particle mesh ────────────────────────────────────────
     if (gpuCompute && positionVariable) {
-      const count    = COMPUTE_SIZE * COMPUTE_SIZE
-      const geo      = new THREE.BufferGeometry()
+      const count      = COMPUTE_SIZE * COMPUTE_SIZE
+      const geo        = new THREE.BufferGeometry()
       const positions  = new Float32Array(count * 3)
       const references = new Float32Array(count * 2)
 
@@ -324,8 +326,8 @@ export default function ThreeScene({ device, onSceneReady, onRafTick }: ThreeSce
           void main() {
             vec2 c = gl_PointCoord - 0.5;
             float mask = smoothstep(0.5, 0.35, length(c));
-            vec3 c1 = vec3(1.0,  0.78, 0.18);  // gold
-            vec3 c2 = vec3(0.85, 0.55, 0.05);  // deep amber
+            vec3 c1 = vec3(1.0, 0.84, 0.0);
+            vec3 c2 = vec3(1.0, 0.55, 0.0);
             float mix_ = clamp((vPos.x * 0.001) + (vPos.y * 0.001) + 0.5, 0.0, 1.0);
             gl_FragColor = vec4(mix(c1, c2, mix_), uAlpha * mask);
           }
@@ -347,6 +349,9 @@ export default function ThreeScene({ device, onSceneReady, onRafTick }: ThreeSce
     const planeMeshes: PlaneEntry[] = []
     const textureLoader = new THREE.TextureLoader()
 
+    // pointerScreen tracks raw screen px — used for local UV mouse (reference fix)
+    const pointerScreen = new THREE.Vector2(W() / 2, H() / 2)
+
     function buildPlanes() {
       planeMeshes.forEach(({ mesh }) => {
         scene.remove(mesh)
@@ -360,12 +365,12 @@ export default function ThreeScene({ device, onSceneReady, onRafTick }: ThreeSce
         const geo  = new THREE.PlaneGeometry(rect.width, rect.height, 32, 32)
         const mat  = new THREE.ShaderMaterial({
           uniforms: {
-            uTexture:      { value: null },
-            uVelocity:     { value: 0 },
-            uHoverStrength:{ value: 0 },
-            uMouse:        { value: new THREE.Vector2(0.5, 0.5) },
-            uImageSize:    { value: new THREE.Vector2(1, 1) },
-            uPlaneSize:    { value: new THREE.Vector2(rect.width, rect.height) },
+            uTexture:       { value: null },
+            uVelocity:      { value: 0 },
+            uHoverStrength: { value: 0 },
+            uMouse:         { value: new THREE.Vector2(0.5, 0.5) },
+            uImageSize:     { value: new THREE.Vector2(Math.max(rect.width, 1), Math.max(rect.height, 1)) },
+            uPlaneSize:     { value: new THREE.Vector2(rect.width, rect.height) },
           },
           vertexShader:   planeVertexShader,
           fragmentShader: planeFragmentShader,
@@ -395,30 +400,38 @@ export default function ThreeScene({ device, onSceneReady, onRafTick }: ThreeSce
     buildPlanes()
     syncPlaneTransforms()
 
-    // ── Raycaster / pointer ──────────────────────────────────
+    // ── Pointer / Touch ──────────────────────────────────────
     const raycaster  = new THREE.Raycaster()
     const pointerNDC = new THREE.Vector2(2, 2)
 
     const onPointerMove = (e: PointerEvent) => {
-      const rect = renderer.domElement.getBoundingClientRect()
-      pointerNDC.x =  ((e.clientX - rect.left) / rect.width)  * 2 - 1
-      pointerNDC.y = -((e.clientY - rect.top)  / rect.height) * 2 + 1
-    }
-
-    const onMouseMove = (e: MouseEvent) => {
+      pointerScreen.set(e.clientX, e.clientY)
+      pointerNDC.x =  (e.clientX / W()) * 2 - 1
+      pointerNDC.y = -(e.clientY / H()) * 2 + 1
+      // mouse → FBO space (Y flipped, same as reference)
       fboMouse.set(e.clientX, H() - e.clientY, 0)
     }
 
-    // Touch support for particle repulsion
+    // Touch: scatter particles on tap/drag + drive scroll scatter
     const onTouchMove = (e: TouchEvent) => {
       if (e.touches.length > 0) {
-        fboMouse.set(e.touches[0].clientX, H() - e.touches[0].clientY, 0)
+        const t = e.touches[0]
+        fboMouse.set(t.clientX, H() - t.clientY, 0)
+        pointerScreen.set(t.clientX, t.clientY)
+      }
+    }
+
+    // Touch start: burst — set fboMouse to touch point for instant repulsion
+    const onTouchStart = (e: TouchEvent) => {
+      if (e.touches.length > 0) {
+        const t = e.touches[0]
+        fboMouse.set(t.clientX, H() - t.clientY, 0)
       }
     }
 
     window.addEventListener('pointermove', onPointerMove, { passive: true })
-    window.addEventListener('mousemove',   onMouseMove,   { passive: true })
     window.addEventListener('touchmove',   onTouchMove,   { passive: true })
+    window.addEventListener('touchstart',  onTouchStart,  { passive: true })
 
     // ── Resize ───────────────────────────────────────────────
     function onResize() {
@@ -427,7 +440,7 @@ export default function ThreeScene({ device, onSceneReady, onRafTick }: ThreeSce
       renderer.setSize(W(), H())
       bloomComposer.setSize(W(), H())
       finalComposer.setSize(W(), H())
-      bloomPass.setSize(W(), H())
+      bloomPass.setSize(new THREE.Vector2(W(), H()))
       positionVariable?.material.uniforms.uBounds?.value.set(W(), H(), 100)
       velocityVariable?.material.uniforms.uBounds?.value.set(W(), H(), 100)
       buildPlanes()
@@ -437,11 +450,10 @@ export default function ThreeScene({ device, onSceneReady, onRafTick }: ThreeSce
     window.addEventListener('resize', onResize, { passive: true })
 
     // ── RAF loop ─────────────────────────────────────────────
-    let scrollVelocity  = 0
+    let scrollVelocity   = 0
     let smoothedVelocity = 0
     let rafId: number
 
-    // Expose scroll velocity setter for Lenis
     ;(window as Window & { __setScrollVelocity?: (v: number) => void }).__setScrollVelocity = (v: number) => {
       scrollVelocity = v
     }
@@ -453,22 +465,29 @@ export default function ThreeScene({ device, onSceneReady, onRafTick }: ThreeSce
 
       syncPlaneTransforms()
 
+      // scroll bend: active on desktop/laptop, disabled on touch (matches reference)
       const targetVel = device.isTouchDevice ? 0 : scrollVelocity
       smoothedVelocity += (targetVel - smoothedVelocity) * 0.16
 
-      // Hover detection
+      // Hover detection via raycaster
       raycaster.setFromCamera(pointerNDC, camera)
       const hits = raycaster.intersectObjects(planeMeshes.map(p => p.mesh))
 
-      planeMeshes.forEach(({ mesh }) => {
+      planeMeshes.forEach(({ element, mesh }) => {
         const mat = mesh.material as THREE.ShaderMaterial
         mat.uniforms.uVelocity.value = smoothedVelocity
+
         const isHit = hits.length > 0 && hits[0].object === mesh
         mat.uniforms.uHoverStrength.value += ((isHit ? 1 : 0) - mat.uniforms.uHoverStrength.value) * 0.1
-        mat.uniforms.uMouse.value.set(pointerNDC.x * 0.5 + 0.5, pointerNDC.y * 0.5 + 0.5)
+
+        // local bounding-box UV mouse (reference fix — prevents wrong distortion)
+        const rect   = element.getBoundingClientRect()
+        const localX = (pointerScreen.x - rect.left) / Math.max(rect.width,  1)
+        const localY = (pointerScreen.y - rect.top)  / Math.max(rect.height, 1)
+        mat.uniforms.uMouse.value.set(localX, 1.0 - localY)
       })
 
-      // GPGPU
+      // GPGPU compute
       if (gpuCompute && positionVariable && velocityVariable) {
         velocityVariable.material.uniforms.uMouse.value.copy(fboMouse)
         velocityVariable.material.uniforms.uTime.value  += 0.01
@@ -495,12 +514,11 @@ export default function ThreeScene({ device, onSceneReady, onRafTick }: ThreeSce
 
     rafId = requestAnimationFrame(raf)
 
-    // ── Cleanup ──────────────────────────────────────────────
     return () => {
       cancelAnimationFrame(rafId)
       window.removeEventListener('pointermove', onPointerMove)
-      window.removeEventListener('mousemove',   onMouseMove)
       window.removeEventListener('touchmove',   onTouchMove)
+      window.removeEventListener('touchstart',  onTouchStart)
       window.removeEventListener('resize',      onResize)
       renderer.dispose()
       bloomComposer.dispose()

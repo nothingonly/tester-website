@@ -7,7 +7,6 @@ import type { DeviceInfo } from '@/hooks/useDevice'
 
 gsap.registerPlugin(ScrollTrigger)
 
-
 interface HeroObjectProps {
   scene: THREE.Scene
   bloomLayer: number
@@ -21,34 +20,42 @@ export default function HeroObject({ scene, bloomLayer, device, onUpdate }: Hero
   useEffect(() => {
     if (!scene) return
 
-    // Scale the object based on breakpoint
-    const scale = device.isMobile ? 0.55
-      : device.isPhablet ? 0.7
-      : device.isTablet  ? 0.85
+    const scale = device.isMobile  ? 0.45
+      : device.isPhablet ? 0.6
+      : device.isTablet  ? 0.75
       : 1.0
 
     const outerRadius = 130 * scale
-    const innerRadius = 88  * scale
 
-    // X position: push to right on desktop, center-ish on mobile
-    const xFactor = device.isMobile || device.isPhablet ? 0.5 : 0.78
+    // on mobile/phablet: hide behind content (push far right / off-screen subtly)
+    // on tablet+: sit at right side of viewport
+    const xFactor = device.isMobile  ? 0.82
+      : device.isPhablet ? 0.80
+      : device.isTablet  ? 0.78
+      : 0.78
+
+    // vertical: center on mobile, slightly above center on desktop
+    const yFactor = device.isMobile || device.isPhablet ? 0.35 : 0.5
 
     const geoOuter = new THREE.IcosahedronGeometry(outerRadius, 1)
     const matOuter = new THREE.MeshBasicMaterial({
-      color: 0xf5c518, wireframe: true, transparent: true, opacity: 0.12,
+      color: 0xf5c518, wireframe: true, transparent: true,
+      opacity: device.isMobile ? 0.07 : 0.12,
     })
     const outerMesh = new THREE.Mesh(geoOuter, matOuter)
 
     const group = new THREE.Group()
     group.add(outerMesh)
-    group.position.set(window.innerWidth * xFactor, window.innerHeight * 0.5, -100)
+    group.position.set(
+      window.innerWidth  * xFactor,
+      window.innerHeight * yFactor,
+      -100,
+    )
     scene.add(group)
     groupRef.current = group
 
-    // Animate in
     gsap.from(group.scale, { x: 0, y: 0, z: 0, duration: 1.6, ease: 'elastic.out(1, 0.6)', delay: 0.2 })
 
-    // Scroll dissolve
     ScrollTrigger.create({
       trigger: '.hero',
       start: 'top top',
@@ -57,12 +64,11 @@ export default function HeroObject({ scene, bloomLayer, device, onUpdate }: Hero
       onUpdate: (self) => {
         const p = self.progress
         group.scale.setScalar(1 - p * 0.4)
-        matOuter.opacity = 0.07 * (1 - p)
-        group.position.y = window.innerHeight * 0.5 + p * 80
+        matOuter.opacity = (device.isMobile ? 0.07 : 0.12) * (1 - p)
+        group.position.y = window.innerHeight * yFactor + p * 80
       },
     })
 
-    // Mouse parallax (skip on touch)
     let mouseX = 0, mouseY = 0, targetX = 0, targetY = 0
     const onMouseMove = (e: MouseEvent) => {
       mouseX = (e.clientX / window.innerWidth  - 0.5) * 2
@@ -70,7 +76,6 @@ export default function HeroObject({ scene, bloomLayer, device, onUpdate }: Hero
     }
     if (!device.isTouchDevice) window.addEventListener('mousemove', onMouseMove, { passive: true })
 
-    // Register update callback
     onUpdate((time: number) => {
       group.rotation.y = time * 0.12
       group.rotation.x = time * 0.07
@@ -85,7 +90,8 @@ export default function HeroObject({ scene, bloomLayer, device, onUpdate }: Hero
 
     return () => {
       scene.remove(group)
-      geoOuter.dispose(); matOuter.dispose()
+      geoOuter.dispose()
+      matOuter.dispose()
       window.removeEventListener('mousemove', onMouseMove)
       ScrollTrigger.getAll().forEach(t => t.kill())
     }
