@@ -1,5 +1,5 @@
 'use client'
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useCallback } from 'react'
 import * as THREE from 'three'
 import gsap from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
@@ -16,6 +16,7 @@ interface HeroObjectProps {
 
 export default function HeroObject({ scene, bloomLayer, device, onUpdate }: HeroObjectProps) {
   const groupRef = useRef<THREE.Group | null>(null)
+  const triggerRef = useRef<ScrollTrigger | null>(null)
 
   useEffect(() => {
     if (!scene) return
@@ -27,14 +28,11 @@ export default function HeroObject({ scene, bloomLayer, device, onUpdate }: Hero
 
     const outerRadius = 130 * scale
 
-    // on mobile/phablet: hide behind content (push far right / off-screen subtly)
-    // on tablet+: sit at right side of viewport
     const xFactor = device.isMobile  ? 0.82
       : device.isPhablet ? 0.80
       : device.isTablet  ? 0.78
       : 0.78
 
-    // vertical: center on mobile, slightly above center on desktop
     const yFactor = device.isMobile || device.isPhablet ? 0.35 : 0.5
 
     const geoOuter = new THREE.IcosahedronGeometry(outerRadius, 1)
@@ -56,7 +54,7 @@ export default function HeroObject({ scene, bloomLayer, device, onUpdate }: Hero
 
     gsap.from(group.scale, { x: 0, y: 0, z: 0, duration: 1.6, ease: 'elastic.out(1, 0.6)', delay: 0.2 })
 
-    ScrollTrigger.create({
+    const scrollTrigger = ScrollTrigger.create({
       trigger: '.hero',
       start: 'top top',
       end:   'bottom top',
@@ -68,6 +66,7 @@ export default function HeroObject({ scene, bloomLayer, device, onUpdate }: Hero
         group.position.y = window.innerHeight * yFactor + p * 80
       },
     })
+    triggerRef.current = scrollTrigger
 
     let mouseX = 0, mouseY = 0, targetX = 0, targetY = 0
     const onMouseMove = (e: MouseEvent) => {
@@ -77,23 +76,26 @@ export default function HeroObject({ scene, bloomLayer, device, onUpdate }: Hero
     if (!device.isTouchDevice) window.addEventListener('mousemove', onMouseMove, { passive: true })
 
     onUpdate((time: number) => {
-      group.rotation.y = time * 0.12
-      group.rotation.x = time * 0.07
+      if (!groupRef.current) return
+      groupRef.current.rotation.y = time * 0.12
+      groupRef.current.rotation.x = time * 0.07
       if (!device.isTouchDevice) {
         targetX += (mouseX * 0.08 - targetX) * 0.05
         targetY += (mouseY * 0.08 - targetY) * 0.05
-        group.rotation.x += targetY
-        group.rotation.y += targetX
+        groupRef.current.rotation.x += targetY
+        groupRef.current.rotation.y += targetX
       }
-      group.position.x = window.innerWidth * xFactor
+      groupRef.current.position.x = window.innerWidth * xFactor
     })
 
     return () => {
       scene.remove(group)
       geoOuter.dispose()
       matOuter.dispose()
+      if (triggerRef.current) {
+        triggerRef.current.kill()
+      }
       window.removeEventListener('mousemove', onMouseMove)
-      ScrollTrigger.getAll().forEach(t => t.kill())
     }
   }, [scene, bloomLayer, device, onUpdate])
 
